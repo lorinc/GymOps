@@ -1,10 +1,11 @@
-# GymOps — Entity Relationship Diagram (Draft v4)
+# GymOps — Entity Relationship Diagram (Draft v5)
 
 Revised after discussion: adds resource management as first-class temporal bookings.
 Rooms, equipment, and coaches are no longer static defaults/FKs on a session — they
 are reservable resources with a time window, so the system can detect double-bookings
 and over-allocation (e.g. requesting more kettlebells than the gym owns, or assigning
-a coach to two overlapping sessions).
+a coach to two overlapping sessions). Also adds `WAITLIST_ENTRY` for people — walk-ins
+included — who want to be notified when a spot opens in a full group.
 
 ## Where double-booking prevention lives
 
@@ -76,6 +77,25 @@ rejection and offer cancel/reassign as the next actions — not to provide a byp
   a guardian, for a minor).
 - **Coach vs. admin permission boundaries are intentionally left unmodeled** — pending
   the client's answer on which decisions belong to which role.
+- **`WAITLIST_ENTRY` is a staff working-set, not an auto-notify queue.** Per the client:
+  fitting waitlisted people into groups takes real negotiation over room, time, coach,
+  and equipment availability — it's something a coach or admin actively works out, not
+  something the system resolves by itself the moment a slot frees up. So:
+  - It targets a `desired_course_id` (`COURSE`), not a specific `GROUP` — most people
+    waitlisting are flexible on day/time within an activity ("any Judo slot, Tue or Thu
+    afternoon"), and `preferred_schedule_notes` captures that free-form. A specific
+    `desired_group_id` is optional, for the person who really does only want one exact
+    slot.
+  - Reuses the subject/contact split from `WAIVER`: `subject_person_id` (who'd attend)
+    vs. `contact_person_id` (who to reach — a parent, for a kid). Neither needs an
+    `ACCOUNT` yet; a walk-in's intake can be a bare `PERSON` row with just contact info.
+  - Resolution is explicit staff action, captured on the entry itself:
+    `resolved_group_id`, `resolution_method` (direct assignment vs. sending a signup
+    link), `resolved_by_staff_id`, `resolved_at`.
+  - **`SIGNUP_INVITATION`** models the "send them a link to sign up" path as its own
+    record — a proposed `GROUP` plus a token/expiry, separate from a staff member
+    directly creating the `SUBSCRIPTION` themselves. It completes into a `SUBSCRIPTION`
+    once the contact finishes registration.
 
 ## Diagram
 
@@ -119,6 +139,17 @@ erDiagram
 
     PERSON ||--o{ WAIVER : "is subject of"
     PERSON ||--o{ WAIVER : "signs (if legal guardian)"
+
+    COURSE ||--o{ WAITLIST_ENTRY : "is desired activity for"
+    GROUP ||--o{ WAITLIST_ENTRY : "is specifically requested by (optional)"
+    GROUP ||--o{ WAITLIST_ENTRY : "resolved into (optional)"
+    PERSON ||--o{ WAITLIST_ENTRY : "is subject of (would attend)"
+    PERSON ||--o{ WAITLIST_ENTRY : "is contact for"
+    STAFF ||--o{ WAITLIST_ENTRY : "resolved by"
+
+    WAITLIST_ENTRY ||--o| SIGNUP_INVITATION : "may generate"
+    GROUP ||--o{ SIGNUP_INVITATION : "proposed for"
+    SIGNUP_INVITATION ||--o| SUBSCRIPTION : "completes into"
 
     PERSON ||--o| STAFF : "may also be"
 
@@ -286,6 +317,32 @@ erDiagram
         date signed_at
         string document_ref
     }
+
+    WAITLIST_ENTRY {
+        uuid id
+        uuid desired_course_id
+        uuid desired_group_id "optional: only if they want one exact slot"
+        uuid subject_person_id "who would attend"
+        uuid contact_person_id "who to reach"
+        string preferred_schedule_notes "free-form, e.g. Tue/Thu afternoons"
+        datetime requested_at
+        enum status "open, resolved, expired, cancelled"
+        uuid resolved_group_id "which group they actually ended up in"
+        enum resolution_method "direct_assignment, signup_invitation"
+        uuid resolved_by_staff_id
+        datetime resolved_at
+    }
+
+    SIGNUP_INVITATION {
+        uuid id
+        uuid waitlist_entry_id
+        uuid group_id "proposed group"
+        string token
+        datetime sent_at
+        datetime expires_at
+        enum status "pending, completed, expired, cancelled"
+        uuid resulting_subscription_id
+    }
 ```
 
 ## Open questions for the next pass
@@ -307,3 +364,18 @@ erDiagram
   or just warn the coach/admin and let a human resolve it?
 - **Group-level vs. session-level capacity**: `GROUP.capacity` is a default; does
   `CLASS_SESSION.capacity_override` ever get used in practice, or is it dead weight for v1?
+- **Waitlist triage is manual, not automated** — resolved per the client: this is a
+  coach/admin working set, not a FIFO auto-notify system. No open question here, but
+  worth stating since it reverses the earlier assumption.
+- **Does an existing member's one-off swap request belong in `WAITLIST_ENTRY` at all?**
+  ("Juan can't come Tuesday, can he join another group this week?") is arguably a
+  different use case from a brand-new walk-in wanting a permanent spot — one is a
+  temporary, single-session accommodation; the other is a new enrollment. They may need
+  to be modeled separately rather than sharing `WAITLIST_ENTRY`/`SIGNUP_INVITATION`.
+- **`SIGNUP_INVITATION` expiry handling**: what happens when a sent link expires
+  unused — does the `WAITLIST_ENTRY` revert to `open` automatically, or does staff have
+  to notice and re-resolve it manually?
+- **Direct assignment path detail**: when staff resolves a `WAITLIST_ENTRY` via
+  `direct_assignment` rather than an invitation, does that require the `subject_person`
+  to already have an `ACCOUNT`/`PAYMENT_METHOD` in place, or can staff create the
+  `SUBSCRIPTION` first and chase billing setup afterward?
